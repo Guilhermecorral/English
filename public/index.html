@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <!-- Metadados básicos para renderização e suporte a caracteres especiais -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemini Live English Coach 🎙️</title>
+  
+  <!-- Fonte moderna do Google Fonts (Inter) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  
+  <!-- Nosso arquivo de estilos CSS -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Container principal que centraliza toda a aplicação -->
+  <div class="app-container">
+    
+    <!-- Cabeçalho (Header): Logo, Título e Indicador de Conexão -->
+    <header class="app-header">
+      <div class="logo-area">
+        <div class="logo-icon">🎙️</div>
+        <div>
+          <h1>Gemini Live English Coach</h1>
+          <p class="subtitle">Pratique conversação em inglês por voz em tempo real</p>
+        </div>
+      </div>
+      
+      <!-- Badge de status que muda de cor via JavaScript conforme o estado da conexão -->
+      <div id="status-badge" class="badge badge-disconnected">
+        <span class="status-dot"></span>
+        <span id="status-text">Desconectado</span>
+      </div>
+    </header>
+
+    <!-- Painel de Configurações: Seleção de Cenário, Voz e API Key -->
+    <section class="config-panel">
+      
+      <!-- Seletor de Cenários de Roleplay -->
+      <div class="config-group">
+        <label for="scenario-select" class="form-label">
+          <span class="icon">🎭</span> Escolha o Cenário:
+        </label>
+        <div class="scenario-grid">
+          <button class="scenario-card active" data-scenario="barista">
+            <span class="card-icon">☕</span>
+            <div class="card-info">
+              <strong>New York Barista</strong>
+              <small>Peça café e converse na cafeteria</small>
+            </div>
+          </button>
+
+          <button class="scenario-card" data-scenario="interview">
+            <span class="card-icon">💼</span>
+            <div class="card-info">
+              <strong>Job Interview</strong>
+              <small>Simulação de entrevista de emprego</small>
+            </div>
+          </button>
+
+          <button class="scenario-card" data-scenario="airport">
+            <span class="card-icon">✈️</span>
+            <div class="card-info">
+              <strong>Airport & Travel</strong>
+              <small>Check-in e imigração no aeroporto</small>
+            </div>
+          </button>
+
+          <button class="scenario-card" data-scenario="tutor">
+            <span class="card-icon">🧑‍🏫</span>
+            <div class="card-info">
+              <strong>English Coach</strong>
+              <small>Conversa livre com dicas de pronúncia</small>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <!-- Configurações Adicionais: Voz e API Key Opcional -->
+      <div class="config-row">
+        <!-- Seletor de Voz -->
+        <div class="input-field">
+          <label for="voice-select" class="form-label">
+            <span class="icon">🔊</span> Voz da IA:
+          </label>
+          <select id="voice-select" class="custom-select">
+            <option value="Aoede" selected>Aoede (Feminina - Clara e Natural)</option>
+            <option value="Kore">Kore (Feminina - Suave)</option>
+            <option value="Puck">Puck (Masculina - Energética e Jovem)</option>
+            <option value="Charon">Charon (Masculina - Firme e Profissional)</option>
+            <option value="Fenrir">Fenrir (Masculina - Profunda)</option>
+          </select>
+        </div>
+
+        <!-- Chave de API Manual (Opcional caso esteja no .env) -->
+        <div class="input-field">
+          <label for="api-key-input" class="form-label">
+            <span class="icon">🔑</span> Chave Google AI Studio <span class="tag-optional">(Opcional se tiver no .env)</span>:
+          </label>
+          <input 
+            type="password" 
+            id="api-key-input" 
+            class="custom-input" 
+            placeholder="Cole sua chave AI Studio aqui se desejar..."
+          >
+        </div>
+      </div>
+    </section>
+
+    <!-- Hub Central de Áudio: Visualizador de Ondas e Botão de Microfone -->
+    <section class="voice-hub">
+      
+      <!-- Canvas HTML5 onde desenhamos as ondas de áudio em tempo real via JS -->
+      <canvas id="visualizer" width="600" height="120"></canvas>
+      
+      <div class="mic-container">
+        <!-- Botão principal de Ligar/Desligar a chamada de voz -->
+        <button id="mic-btn" class="mic-button" title="Clique para iniciar ou parar">
+          <div class="pulse-ring"></div>
+          <div class="mic-inner-icon">
+            <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor">
+              <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+              <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+            </svg>
+          </div>
+        </button>
+      </div>
+
+      <!-- Texto descritivo que orienta o usuário sobre o que está acontecendo -->
+      <p id="action-prompt" class="action-prompt">
+        Clique no microfone para iniciar a conversação em inglês!
+      </p>
+
+      <!-- Dica prática para o usuário -->
+      <div class="call-hints">
+        <span>💡 <strong>Dica:</strong> Use fones de ouvido para melhor experiência e sinta-se livre para interromper a IA a qualquer momento!</span>
+      </div>
+    </section>
+
+    <!-- Área de Transcrição e Mensagens ao Vivo -->
+    <section class="transcript-section">
+      <div class="transcript-header">
+        <h2>📝 Transcrição da Conversa</h2>
+        <button id="clear-chat-btn" class="btn-secondary" title="Limpar histórico">Limpar</button>
+      </div>
+
+      <!-- Caixa com rolagem automática onde as falas do usuário e da IA aparecem -->
+      <div id="chat-messages" class="chat-messages">
+        <div class="message-bubble system-message">
+          <span>👋 Selecione um cenário acima e clique no microfone para começar a falar!</span>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- Nosso arquivo JavaScript principal -->
+  <script src="app.js"></script>
+</body>
+</html>

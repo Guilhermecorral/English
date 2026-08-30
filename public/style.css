@@ -1,0 +1,506 @@
+/**
+ * ==============================================================================
+ * GUIA DE CSS DIDÁTICO: Estilização Moderna, Dark Mode e Responsividade
+ * ==============================================================================
+ *
+ * 1. Variáveis CSS (:root): Permitem reutilizar cores, fontes e espaçamentos no projeto todo.
+ * 2. Flexbox e CSS Grid: Métodos modernos para posicionar e alinhar elementos na tela.
+ * 3. Glassmorphism: Efeito visual translúcido moderno com 'backdrop-filter: blur()'.
+ * 4. Animações (@keyframes): Criam efeitos suaves de pulsar e transição.
+ */
+
+:root {
+  /* Paleta de Cores Principais */
+  --bg-primary: #0b0f19;       /* Fundo escuro principal */
+  --bg-secondary: #131b2e;     /* Fundo dos cartões e painéis */
+  --bg-card-hover: #1c2742;    /* Efeito ao passar o mouse */
+  
+  --accent-color: #6366f1;     /* Roxo/Índigo moderno */
+  --accent-hover: #4f46e5;
+  --accent-glow: rgba(99, 102, 241, 0.4);
+
+  --cyan-neon: #06b6d4;        /* Ciano vibrante para ondas sonoras */
+  --emerald-green: #10b981;    /* Verde para status conectado */
+  --rose-red: #f43f5e;         /* Vermelho para gravação/desconectado */
+  --amber-yellow: #f59e0b;     /* Amarelo para atenção/dicas */
+
+  /* Cores de Texto */
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-dark: #0f172a;
+
+  /* Bordas e Sombras */
+  --border-color: rgba(255, 255, 255, 0.08);
+  --border-active: rgba(99, 102, 241, 0.5);
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-full: 9999px;
+  --shadow-sm: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 10px 25px -3px rgba(0, 0, 0, 0.4);
+}
+
+/* Reset básico universal */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-main);
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 24px 16px;
+  background-image: 
+    radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.12) 0%, transparent 40%),
+    radial-gradient(circle at 90% 80%, rgba(6, 182, 212, 0.1) 0%, transparent 40%);
+  background-attachment: fixed;
+}
+
+/* Container centralizado com largura máxima */
+.app-container {
+  width: 100%;
+  max-width: 900px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ==============================================================================
+ * CABEÇALHO (Header)
+ * ============================================================================== */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 24px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(12px);
+}
+
+.logo-area {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.logo-icon {
+  font-size: 32px;
+  background: rgba(99, 102, 241, 0.15);
+  padding: 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-active);
+}
+
+.app-header h1 {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #ffffff 40%, #a5b4fc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.subtitle {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* Badges de Status (Conectado / Desconectado / Falando) */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.badge-disconnected {
+  background: rgba(244, 63, 94, 0.15);
+  color: #fda4af;
+  border: 1px solid rgba(244, 63, 94, 0.3);
+}
+.badge-disconnected .status-dot {
+  background: var(--rose-red);
+}
+
+.badge-connected {
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.badge-connected .status-dot {
+  background: var(--emerald-green);
+  box-shadow: 0 0 8px var(--emerald-green);
+}
+
+.badge-speaking {
+  background: rgba(6, 182, 212, 0.15);
+  color: #67e8f9;
+  border: 1px solid rgba(6, 182, 212, 0.3);
+}
+.badge-speaking .status-dot {
+  background: var(--cyan-neon);
+  box-shadow: 0 0 10px var(--cyan-neon);
+  animation: pulse-dot 1s infinite alternate;
+}
+
+@keyframes pulse-dot {
+  0% { transform: scale(0.8); opacity: 0.6; }
+  100% { transform: scale(1.3); opacity: 1; }
+}
+
+/* ==============================================================================
+ * PAINEL DE CONFIGURAÇÕES (Cards & Inputs)
+ * ============================================================================== */
+.config-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.form-label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.form-label .icon {
+  margin-right: 4px;
+}
+
+.tag-optional {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: #64748b;
+}
+
+/* Grid com os Cards de Cenários */
+.scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.scenario-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.25s ease;
+  color: var(--text-main);
+}
+
+.scenario-card:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.15);
+  transform: translateY(-2px);
+}
+
+.scenario-card.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent-color);
+  box-shadow: 0 0 16px rgba(99, 102, 241, 0.25);
+}
+
+.card-icon {
+  font-size: 24px;
+}
+
+.card-info strong {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.card-info small {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* Linha com inputs de Voz e API Key */
+.config-row {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr;
+  gap: 16px;
+}
+
+.custom-select, .custom-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.custom-select:focus, .custom-input:focus {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+}
+
+.custom-select option {
+  background: var(--bg-secondary);
+  color: var(--text-main);
+}
+
+/* ==============================================================================
+ * HUB DE VOZ (Visualizador de Áudio e Botão de Microfone)
+ * ============================================================================== */
+.voice-hub {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+#visualizer {
+  width: 100%;
+  max-width: 600px;
+  height: 100px;
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.mic-container {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 10px 0;
+}
+
+.mic-button {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent-color), #4338ca);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  box-shadow: 0 8px 20px var(--accent-glow);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 2;
+}
+
+.mic-button:hover {
+  transform: scale(1.06);
+  box-shadow: 0 12px 28px rgba(99, 102, 241, 0.6);
+}
+
+.mic-button.active {
+  background: linear-gradient(135deg, var(--rose-red), #be123c);
+  box-shadow: 0 8px 24px rgba(244, 63, 94, 0.5);
+}
+
+.pulse-ring {
+  position: absolute;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-color);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.mic-button.active + .pulse-ring,
+.mic-button.active .pulse-ring {
+  animation: mic-pulsing 2s infinite ease-out;
+  border-color: var(--rose-red);
+}
+
+@keyframes mic-pulsing {
+  0% { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+.action-prompt {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text-main);
+  text-align: center;
+}
+
+.call-hints {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-size: 0.8rem;
+  color: #fde68a;
+  text-align: center;
+}
+
+/* ==============================================================================
+ * ÁREA DE TRANSCRIÇÃO (Chat)
+ * ============================================================================== */
+.transcript-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.transcript-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.transcript-header h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-main);
+}
+
+.chat-messages {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 6px;
+}
+
+/* Barra de rolagem estilizada */
+.chat-messages::-webkit-scrollbar {
+  width: 6px;
+}
+.chat-messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-full);
+}
+
+.message-bubble {
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  max-width: 85%;
+  animation: fade-in 0.3s ease;
+}
+
+.message-bubble.user {
+  align-self: flex-end;
+  background: linear-gradient(135deg, #4f46e5, #4338ca);
+  color: #ffffff;
+  border-bottom-right-radius: 4px;
+}
+
+.message-bubble.ai {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  border-bottom-left-radius: 4px;
+}
+
+.message-bubble.system-message {
+  align-self: center;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-align: center;
+  border-radius: var(--radius-full);
+}
+
+.message-author {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.8;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ==============================================================================
+ * RESPONSIVIDADE (Mobile & Telas Menores)
+ * ============================================================================== */
+@media (max-width: 640px) {
+  .app-header {
+    flex-direction: column;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  
+  .config-row {
+    grid-template-columns: 1fr;
+  }
+
+  .scenario-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "gemini-live-english-coach",
+  "version": "1.0.0",
+  "description": "Treinador de conversação em inglês por voz em tempo real com Gemini Live API",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google/genai": "^2.19.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}
