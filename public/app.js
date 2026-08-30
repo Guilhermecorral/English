@@ -4,10 +4,10 @@
  * ==============================================================================
  *
  * Conceitos aplicados aqui:
- * 1. Manipulação do DOM (Document Object Model): Interagir com botões, inputs e textos na tela.
- * 2. Web Audio API: Captura do microfone, análise de frequências e reprodução de áudio de alta performance.
- * 3. AudioWorklet: Processamento de áudio em segundo plano (resample para 16kHz PCM).
- * 4. WebSockets: Comunicação bidirecional contínua com o servidor (Node.js -> Gemini Live).
+ * 1. Manipulação do DOM: Capturar botões, selects e atualizar histórico de mensagens.
+ * 2. Web Audio API: Captura de microfone com fallback inteligente (AudioWorklet + ScriptProcessor).
+ * 3. Conversão de Áudio (Downsample): Microfone (44.1k/48k) -> 16kHz Int16 PCM (padrão Gemini Live).
+ * 4. WebSockets: Envio contínuo de áudio e recebimento das respostas com baixa latência.
  */
 
 // ==========================================
@@ -36,30 +36,25 @@ let socket = null;
 // Áudio Web API
 let audioContext = null;
 let mediaStream = null;
-let audioWorkletNode = null;
+let scriptProcessorNode = null;
+let dummyGainNode = null;
 let analyserNode = null;
 
 // Fila de reprodução de áudio do Gemini (24kHz PCM)
-let audioPlaybackQueue = [];
-let isPlayingAudio = false;
 let nextStartTime = 0;
 let activeAudioSourceNodes = [];
 
 // ==========================================
 // 3. SELEÇÃO DE CENÁRIOS E VOZ
 // ==========================================
-// Adiciona evento de clique para cada cartão de cenário
 scenarioCards.forEach(card => {
   card.addEventListener('click', () => {
-    // Remove a classe 'active' de todos os outros cartões
     scenarioCards.forEach(c => c.classList.remove('active'));
-    // Adiciona a classe 'active' no cartão clicado
     card.classList.add('active');
     currentScenario = card.getAttribute('data-scenario');
     
     addSystemMessage(`Cenário alterado para: <strong>${card.querySelector('strong').innerText}</strong>`);
     
-    // Se a sessão estiver ativa, recomenda reiniciar para aplicar o novo prompt
     if (isSessionActive) {
       stopLiveSession();
       setTimeout(() => startLiveSession(), 400);
@@ -67,7 +62,6 @@ scenarioCards.forEach(card => {
   });
 });
 
-// Limpar histórico do chat
 clearChatBtn.addEventListener('click', () => {
   chatMessages.innerHTML = '';
   addSystemMessage('Histórico de conversas limpo.');
@@ -85,19 +79,70 @@ micBtn.addEventListener('click', async () => {
 });
 
 // ==========================================
-// 5. INICIAR SESSÃO AO VIVO (Gemini Live)
+// 5. CÓDIGO DO PROCESSADOR DE ÁUDIO INLINE (BLOB WORKLET)
+// ==========================================
+const WORKLET_PROCESSOR_CODE = `
+class LiveAudioProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.targetSampleRate = 16000;
+  }
+
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || input.length === 0) return true;
+    const channelData = input[0];
+
+    const sampleRateRatio = sampleRate / this.targetSampleRate;
+    const outputLength = Math.floor(channelData.length / sampleRateRatio);
+    const result = new Int16Array(outputLength);
+
+    let offsetResult = 0;
+    let offsetInput = 0;
+
+    while (offsetResult < outputLength) {
+      const nextOffsetInput = Math.round((offsetResult + 1) * sampleRateRatio);
+      let accum = 0;
+      let count = 0;
+      for (let i = offsetInput; i < nextOffsetInput && i < channelData.length; i++) {
+        accum += channelData[i];
+        count++;
+      }
+      const sample = count > 0 ? accum / count : 0;
+      const clamped = Math.max(-1, Math.min(1, sample));
+      result[offsetResult] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+
+      offsetResult++;
+      offsetInput = nextOffsetInput;
+    }
+
+    if (result.length > 0) {
+      this.port.postMessage(result.buffer, [result.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('live-audio-processor', LiveAudioProcessor);
+`;
+
+// ==========================================
+// 6. INICIAR SESSÃO AO VIVO (Gemini Live)
 // ==========================================
 async function startLiveSession() {
   try {
     updateStatus('connecting', 'Conectando...');
     actionPrompt.innerText = 'Inicializando microfone e conectando ao Gemini...';
 
-    // 1. Inicializa o AudioContext do navegador (necessário para processar e tocar som)
+    // 1. Inicializa o AudioContext do navegador
     audioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 24000 // 24kHz é o sample rate padrão das respostas do Gemini Live
+      sampleRate: 24000
     });
 
-    // 2. Solicita acesso ao microfone do usuário
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+
+    // 2. Solicita permissão do microfone
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -106,28 +151,48 @@ async function startLiveSession() {
       }
     });
 
-    // 3. Configura o AnalyserNode para alimentar as ondas visuais
+    // 3. Configura o AnalyserNode para visualização em ondas
     analyserNode = audioContext.createAnalyser();
     analyserNode.fftSize = 256;
     const sourceNode = audioContext.createMediaStreamSource(mediaStream);
     sourceNode.connect(analyserNode);
 
-    // 4. Carrega nosso processador de áudio (AudioWorklet)
-    await audioContext.audioWorklet.addModule('audio-processor.js');
-    audioWorkletNode = new AudioWorkletNode(audioContext, 'live-audio-processor');
-
-    sourceNode.connect(audioWorkletNode);
-
-    // 5. Conecta ao WebSocket do nosso servidor Node.js
+    // 4. Conecta ao WebSocket do servidor Node.js
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
     socket = new WebSocket(wsUrl);
 
-    // Quando o WebSocket abrir com o servidor
+    // Configura o envio de áudio com fallback ultra-compatível
+    let workletLoaded = false;
+
+    if (audioContext.audioWorklet) {
+      try {
+        const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: 'application/javascript' });
+        const workletUrl = URL.createObjectURL(blob);
+        await audioContext.audioWorklet.addModule(workletUrl);
+        const workletNode = new AudioWorkletNode(audioContext, 'live-audio-processor');
+
+        workletNode.port.onmessage = (event) => {
+          if (socket && socket.readyState === WebSocket.OPEN && isSessionActive) {
+            socket.send(event.data);
+          }
+        };
+
+        sourceNode.connect(workletNode);
+        workletLoaded = true;
+        console.log('✅ AudioWorklet carregado com sucesso!');
+      } catch (err) {
+        console.warn('AudioWorklet falhou, ativando modo ScriptProcessor fallback:', err);
+      }
+    }
+
+    // Se o AudioWorklet não estiver disponível, usamos o ScriptProcessorNode nativo
+    if (!workletLoaded) {
+      setupScriptProcessor(sourceNode);
+    }
+
     socket.onopen = () => {
       console.log('🔗 WebSocket conectado ao servidor local');
-
-      // Envia a mensagem de inicialização com cenário, voz e chave opcional
       socket.send(JSON.stringify({
         type: 'start',
         scenario: currentScenario,
@@ -136,7 +201,6 @@ async function startLiveSession() {
       }));
     };
 
-    // Recebe eventos e áudios do servidor
     socket.onmessage = async (event) => {
       const msg = JSON.parse(event.data);
 
@@ -149,18 +213,14 @@ async function startLiveSession() {
           addSystemMessage(`🎙️ Conversa iniciada no cenário <strong>${msg.scenario}</strong>.`);
         }
       } else if (msg.type === 'audio') {
-        // Recebeu pedaço de áudio falado pelo Gemini (Base64 PCM 24kHz)
         updateStatus('speaking', 'Gemini Falando...');
         queueAudioChunk(msg.data);
       } else if (msg.type === 'transcript_user') {
-        // Transcrição do que o usuário acabou de falar
         appendChatMessage('user', msg.text);
       } else if (msg.type === 'transcript_ai') {
-        // Transcrição do que o Gemini respondeu
         appendChatMessage('ai', msg.text);
       } else if (msg.type === 'interrupted') {
-        // Usuário interrompeu a IA: para todo o áudio tocando imediatamente
-        console.log('Interrompendo áudio imediatamente!');
+        console.log('⚡ Interrompendo áudio imediatamente!');
         stopAllAudioPlayback();
         updateStatus('connected', 'Ouvindo você...');
       } else if (msg.type === 'turn_complete') {
@@ -168,14 +228,6 @@ async function startLiveSession() {
       } else if (msg.type === 'error') {
         alert(`Atenção: ${msg.message}`);
         stopLiveSession();
-      }
-    };
-
-    // Quando o AudioWorklet enviar dados de PCM 16kHz do microfone
-    audioWorkletNode.port.onmessage = (event) => {
-      if (socket && socket.readyState === WebSocket.OPEN && isSessionActive) {
-        // Envia os bytes binários do microfone direto via WebSocket
-        socket.send(event.data);
       }
     };
 
@@ -188,7 +240,6 @@ async function startLiveSession() {
       stopLiveSession();
     };
 
-    // Inicia a animação das ondas no Canvas
     drawVisualizer();
 
   } catch (error) {
@@ -198,8 +249,56 @@ async function startLiveSession() {
   }
 }
 
+/**
+ * Fallback usando ScriptProcessorNode para garantir compatibilidade 100%
+ */
+function setupScriptProcessor(sourceNode) {
+  const bufferSize = 4096;
+  scriptProcessorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+  scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
+    if (!isSessionActive || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+    const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+    const sampleRateRatio = audioContext.sampleRate / 16000;
+    const outputLength = Math.floor(inputData.length / sampleRateRatio);
+    const result = new Int16Array(outputLength);
+
+    let offsetResult = 0;
+    let offsetInput = 0;
+
+    while (offsetResult < outputLength) {
+      const nextOffsetInput = Math.round((offsetResult + 1) * sampleRateRatio);
+      let accum = 0;
+      let count = 0;
+      for (let i = offsetInput; i < nextOffsetInput && i < inputData.length; i++) {
+        accum += inputData[i];
+        count++;
+      }
+      const sample = count > 0 ? accum / count : 0;
+      const clamped = Math.max(-1, Math.min(1, sample));
+      result[offsetResult] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+
+      offsetResult++;
+      offsetInput = nextOffsetInput;
+    }
+
+    if (result.length > 0) {
+      socket.send(result.buffer);
+    }
+  };
+
+  sourceNode.connect(scriptProcessorNode);
+
+  // Conecta em um ganho zero para manter o processador ativo sem gerar eco
+  dummyGainNode = audioContext.createGain();
+  dummyGainNode.gain.value = 0;
+  scriptProcessorNode.connect(dummyGainNode);
+  dummyGainNode.connect(audioContext.destination);
+}
+
 // ==========================================
-// 6. FINALIZAR SESSÃO AO VIVO
+// 7. FINALIZAR SESSÃO AO VIVO
 // ==========================================
 function stopLiveSession() {
   isSessionActive = false;
@@ -207,7 +306,6 @@ function stopLiveSession() {
   updateStatus('disconnected', 'Desconectado');
   actionPrompt.innerText = 'Clique no microfone para iniciar a conversação em inglês!';
 
-  // Fecha conexão WebSocket
   if (socket) {
     if (socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'stop' }));
@@ -216,61 +314,60 @@ function stopLiveSession() {
     socket = null;
   }
 
-  // Para o microfone
   if (mediaStream) {
     mediaStream.getTracks().forEach(track => track.stop());
     mediaStream = null;
   }
 
-  // Para o AudioContext e o áudio que estiver tocando
   stopAllAudioPlayback();
+
+  if (scriptProcessorNode) {
+    try { scriptProcessorNode.disconnect(); } catch (e) {}
+    scriptProcessorNode = null;
+  }
+
+  if (dummyGainNode) {
+    try { dummyGainNode.disconnect(); } catch (e) {}
+    dummyGainNode = null;
+  }
+
   if (audioContext && audioContext.state !== 'closed') {
     audioContext.close();
     audioContext = null;
   }
 
-  // Limpa o canvas
   canvasCtx.clearRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
 }
 
 // ==========================================
-// 7. GERENCIAMENTO DE ÁUDIO DO GEMINI (PCM 24kHz)
+// 8. GERENCIAMENTO DE ÁUDIO DO GEMINI (PCM 24kHz)
 // ==========================================
-/**
- * Converte base64 de PCM 24kHz 16-bit para AudioBuffer e enfileira para tocar sem pausas
- */
 function queueAudioChunk(base64Data) {
   if (!audioContext || audioContext.state === 'closed') return;
 
-  // Decodifica a string Base64 para array de bytes
   const binaryString = atob(base64Data);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
 
-  // Converte bytes Int16 para Float32 (-1.0 a 1.0)
   const int16 = new Int16Array(bytes.buffer);
   const float32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) {
     float32[i] = int16[i] / 32768.0;
   }
 
-  // Cria um buffer de áudio nativo do navegador
   const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
   audioBuffer.getChannelData(0).set(float32);
 
-  // Cria o nó de reprodução (BufferSourceNode)
   const source = audioContext.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(audioContext.destination);
 
-  // Se tivermos analyserNode, conectamos a saída nele também para animar as ondas do Gemini
   if (analyserNode) {
     source.connect(analyserNode);
   }
 
-  // Agenda a reprodução contínua (sem cortes entre os blocos recebidos)
   const currentTime = audioContext.currentTime;
   if (nextStartTime < currentTime) {
     nextStartTime = currentTime;
@@ -289,9 +386,6 @@ function queueAudioChunk(base64Data) {
   };
 }
 
-/**
- * Interrompe qualquer áudio que esteja tocando no momento (quando o usuário começa a falar)
- */
 function stopAllAudioPlayback() {
   activeAudioSourceNodes.forEach(source => {
     try {
@@ -304,7 +398,7 @@ function stopAllAudioPlayback() {
 }
 
 // ==========================================
-// 8. VISUALIZADOR DE ONDAS SONORAS (Canvas)
+// 9. VISUALIZADOR DE ONDAS SONORAS (Canvas)
 // ==========================================
 function drawVisualizer() {
   if (!isSessionActive || !analyserNode) return;
@@ -319,7 +413,7 @@ function drawVisualizer() {
   canvasCtx.fillRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
 
   canvasCtx.lineWidth = 2.5;
-  canvasCtx.strokeStyle = '#06b6d4'; // Ciano neon
+  canvasCtx.strokeStyle = '#06b6d4';
   canvasCtx.beginPath();
 
   const sliceWidth = visualizerCanvas.width * 1.0 / bufferLength;
@@ -343,7 +437,7 @@ function drawVisualizer() {
 }
 
 // ==========================================
-// 9. ATUALIZAÇÃO DE INTERFACE E CHAT (DOM)
+// 10. ATUALIZAÇÃO DE INTERFACE E CHAT (DOM)
 // ==========================================
 function updateStatus(state, text) {
   statusBadge.className = 'badge';
@@ -374,7 +468,6 @@ function appendChatMessage(sender, text) {
   bubble.appendChild(content);
 
   chatMessages.appendChild(bubble);
-  // Rola automaticamente para a última mensagem
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
