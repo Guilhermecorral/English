@@ -142,6 +142,18 @@ body {
   background: var(--rose-red);
 }
 
+.badge-connecting {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fcd34d;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.badge-connecting .status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 8px #f59e0b;
+  animation: pulse-dot 1s infinite alternate;
+}
+
 .badge-connected {
   background: rgba(16, 185, 129, 0.15);
   color: #6ee7b7;
@@ -252,7 +264,7 @@ body {
 /* Linha com inputs de Voz e API Key */
 .config-row {
   display: grid;
-  grid-template-columns: 1fr 1.5fr;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 16px;
 }
 

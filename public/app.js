@@ -3,11 +3,10 @@
  * GUIA DE JAVASCRIPT DIDÁTICO: Áudio em Tempo Real, WebSockets e DOM
  * ==============================================================================
  *
- * Conceitos aplicados aqui:
- * 1. Manipulação do DOM: Capturar botões, selects e atualizar histórico de mensagens.
- * 2. Web Audio API: Captura de microfone com fallback inteligente (AudioWorklet + ScriptProcessor).
- * 3. Conversão de Áudio (Downsample): Microfone (44.1k/48k) -> 16kHz Int16 PCM (padrão Gemini Live).
- * 4. WebSockets: Envio contínuo de áudio e recebimento das respostas com baixa latência.
+ * Arquitetura de Áudio:
+ * 1. Captura de Microfone: 16kHz PCM Int16 transmitido continuamente via WebSocket.
+ * 2. Reprodução de Som: Decodificação contínua de PCM 24kHz do Gemini Live.
+ * 3. Streaming de Transcrição: Atualização suave do balão de texto em tempo real.
  */
 
 // ==========================================
@@ -30,25 +29,33 @@ const canvasCtx = visualizerCanvas.getContext('2d');
 // 2. VARIÁVEIS DE ESTADO DA APLICAÇÃO
 // ==========================================
 let isSessionActive = false;
+let isSessionStarting = false;
+let isAiSpeaking = false;
 let currentScenario = 'barista';
 let socket = null;
 
 // Áudio Web API
 let audioContext = null;
 let mediaStream = null;
+let audioWorkletNode = null;
 let scriptProcessorNode = null;
 let dummyGainNode = null;
 let analyserNode = null;
+let visualizerFrameId = null;
 
 // Fila de reprodução de áudio do Gemini (24kHz PCM)
 let nextStartTime = 0;
 let activeAudioSourceNodes = [];
 
+// Balões de mensagens ativos para streaming de texto
+let currentAiBubble = null;
+let currentUserBubble = null;
+
 // ==========================================
 // 3. SELEÇÃO DE CENÁRIOS E VOZ
 // ==========================================
 scenarioCards.forEach(card => {
-  card.addEventListener('click', () => {
+  card.addEventListener('click', async () => {
     scenarioCards.forEach(c => c.classList.remove('active'));
     card.classList.add('active');
     currentScenario = card.getAttribute('data-scenario');
@@ -56,14 +63,16 @@ scenarioCards.forEach(card => {
     addSystemMessage(`Cenário alterado para: <strong>${card.querySelector('strong').innerText}</strong>`);
     
     if (isSessionActive) {
-      stopLiveSession();
-      setTimeout(() => startLiveSession(), 400);
+      await stopLiveSession();
+      await startLiveSession();
     }
   });
 });
 
 clearChatBtn.addEventListener('click', () => {
   chatMessages.innerHTML = '';
+  currentAiBubble = null;
+  currentUserBubble = null;
   addSystemMessage('Histórico de conversas limpo.');
 });
 
@@ -71,78 +80,70 @@ clearChatBtn.addEventListener('click', () => {
 // 4. CONTROLE DO BOTÃO PRINCIPAL (MIC)
 // ==========================================
 micBtn.addEventListener('click', async () => {
+  if (isSessionStarting) return;
+
   if (!isSessionActive) {
     await startLiveSession();
   } else {
-    stopLiveSession();
+    await stopLiveSession();
   }
 });
 
 // ==========================================
-// 5. CÓDIGO DO PROCESSADOR DE ÁUDIO INLINE (BLOB WORKLET)
+// 5. PROCESSAMENTO E ENVIO CONTÍNUO DE ÁUDIO (16kHz PCM)
 // ==========================================
-const WORKLET_PROCESSOR_CODE = `
-class LiveAudioProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.targetSampleRate = 16000;
+function processAndSendMicAudio(inputFloat32Array) {
+  if (!isSessionActive || !audioContext || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+  // Converte da taxa do microfone do navegador para 16kHz Int16 PCM (padrão Gemini Live)
+  const sampleRateRatio = audioContext.sampleRate / 16000;
+  const outputLength = Math.floor(inputFloat32Array.length / sampleRateRatio);
+  const pcmData = new Int16Array(outputLength);
+
+  let offsetResult = 0;
+  let offsetInput = 0;
+
+  while (offsetResult < outputLength) {
+    const nextOffsetInput = Math.round((offsetResult + 1) * sampleRateRatio);
+    let accum = 0;
+    let count = 0;
+    for (let i = offsetInput; i < nextOffsetInput && i < inputFloat32Array.length; i++) {
+      accum += inputFloat32Array[i];
+      count++;
+    }
+    const sample = count > 0 ? accum / count : 0;
+    const clamped = Math.max(-1, Math.min(1, sample));
+    pcmData[offsetResult] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+
+    offsetResult++;
+    offsetInput = nextOffsetInput;
   }
 
-  process(inputs) {
-    const input = inputs[0];
-    if (!input || input.length === 0) return true;
-    const channelData = input[0];
-
-    const sampleRateRatio = sampleRate / this.targetSampleRate;
-    const outputLength = Math.floor(channelData.length / sampleRateRatio);
-    const result = new Int16Array(outputLength);
-
-    let offsetResult = 0;
-    let offsetInput = 0;
-
-    while (offsetResult < outputLength) {
-      const nextOffsetInput = Math.round((offsetResult + 1) * sampleRateRatio);
-      let accum = 0;
-      let count = 0;
-      for (let i = offsetInput; i < nextOffsetInput && i < channelData.length; i++) {
-        accum += channelData[i];
-        count++;
-      }
-      const sample = count > 0 ? accum / count : 0;
-      const clamped = Math.max(-1, Math.min(1, sample));
-      result[offsetResult] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
-
-      offsetResult++;
-      offsetInput = nextOffsetInput;
-    }
-
-    if (result.length > 0) {
-      this.port.postMessage(result.buffer, [result.buffer]);
-    }
-    return true;
+  // Envia o stream de áudio continuamente sem travas
+  if (pcmData.length > 0) {
+    socket.send(pcmData.buffer);
   }
 }
-registerProcessor('live-audio-processor', LiveAudioProcessor);
-`;
 
 // ==========================================
 // 6. INICIAR SESSÃO AO VIVO (Gemini Live)
 // ==========================================
 async function startLiveSession() {
+  if (isSessionActive || isSessionStarting) return;
+  isSessionStarting = true;
+
   try {
-    updateStatus('connecting', 'Conectando...');
+    updateStatus('connecting', 'Conectando ao Gemini... ⏳');
     actionPrompt.innerText = 'Inicializando microfone e conectando ao Gemini...';
 
-    // 1. Inicializa o AudioContext do navegador
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 24000
-    });
+    // 1. Inicializa o AudioContext
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
     if (audioContext.state === 'suspended') {
       await audioContext.resume();
     }
 
-    // 2. Solicita permissão do microfone
+    // 2. Solicita acesso ao microfone com cancelamento de eco nativo do navegador
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -151,49 +152,72 @@ async function startLiveSession() {
       }
     });
 
-    // 3. Configura o AnalyserNode para visualização em ondas
+    // 3. Visualizador de ondas
     analyserNode = audioContext.createAnalyser();
     analyserNode.fftSize = 256;
     const sourceNode = audioContext.createMediaStreamSource(mediaStream);
     sourceNode.connect(analyserNode);
 
-    // 4. Conecta ao WebSocket do servidor Node.js
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
-    socket = new WebSocket(wsUrl);
+    isSessionActive = true;
+    isAiSpeaking = false;
+    micBtn.classList.add('active');
+    drawVisualizer();
 
-    // Configura o envio de áudio com fallback ultra-compatível
-    let workletLoaded = false;
-
+    // 4. Captura contínua de áudio em blocos de baixa latência
+    let workletReady = false;
     if (audioContext.audioWorklet) {
       try {
-        const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: 'application/javascript' });
-        const workletUrl = URL.createObjectURL(blob);
-        await audioContext.audioWorklet.addModule(workletUrl);
-        const workletNode = new AudioWorkletNode(audioContext, 'live-audio-processor');
-
-        workletNode.port.onmessage = (event) => {
-          if (socket && socket.readyState === WebSocket.OPEN && isSessionActive) {
+        await audioContext.audioWorklet.addModule('audio-processor.js');
+        audioWorkletNode = new AudioWorkletNode(audioContext, 'live-audio-processor', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+          channelCount: 1
+        });
+        audioWorkletNode.port.onmessage = (event) => {
+          if (isSessionActive && socket?.readyState === WebSocket.OPEN) {
             socket.send(event.data);
           }
         };
-
-        sourceNode.connect(workletNode);
-        workletLoaded = true;
-        console.log('✅ AudioWorklet carregado com sucesso!');
-      } catch (err) {
-        console.warn('AudioWorklet falhou, ativando modo ScriptProcessor fallback:', err);
+        sourceNode.connect(audioWorkletNode);
+        dummyGainNode = audioContext.createGain();
+        dummyGainNode.gain.value = 0;
+        audioWorkletNode.connect(dummyGainNode);
+        dummyGainNode.connect(audioContext.destination);
+        workletReady = true;
+      } catch (error) {
+        console.warn('AudioWorklet indisponível; usando modo compatível:', error);
       }
     }
 
-    // Se o AudioWorklet não estiver disponível, usamos o ScriptProcessorNode nativo
-    if (!workletLoaded) {
-      setupScriptProcessor(sourceNode);
+    if (!workletReady) {
+      const bufferSize = 2048;
+      scriptProcessorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
+      scriptProcessorNode.onaudioprocess = (event) => {
+        processAndSendMicAudio(event.inputBuffer.getChannelData(0));
+      };
+
+      sourceNode.connect(scriptProcessorNode);
+      dummyGainNode = audioContext.createGain();
+      dummyGainNode.gain.value = 0;
+      scriptProcessorNode.connect(dummyGainNode);
+      dummyGainNode.connect(audioContext.destination);
     }
 
-    socket.onopen = () => {
-      console.log('🔗 WebSocket conectado ao servidor local');
-      socket.send(JSON.stringify({
+    // 5. Conexão WebSocket com o servidor local
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}`;
+    const sessionSocket = new WebSocket(wsUrl);
+    socket = sessionSocket;
+
+    sessionSocket.onopen = () => {
+      if (socket !== sessionSocket || !isSessionActive) {
+        sessionSocket.close();
+        return;
+      }
+
+      console.log('🔗 Conectado ao servidor WebSocket local');
+      sessionSocket.send(JSON.stringify({
         type: 'start',
         scenario: currentScenario,
         voice: voiceSelect.value,
@@ -201,117 +225,111 @@ async function startLiveSession() {
       }));
     };
 
-    socket.onmessage = async (event) => {
-      const msg = JSON.parse(event.data);
+    sessionSocket.onmessage = async (event) => {
+      if (socket !== sessionSocket) return;
+
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch (e) {
+        return;
+      }
 
       if (msg.type === 'status') {
         if (msg.status === 'connected') {
-          isSessionActive = true;
-          micBtn.classList.add('active');
-          updateStatus('connected', 'Conectado');
+          updateStatus('connected', '🟢 Conectado - Ouvindo...');
           actionPrompt.innerText = 'Pode falar em inglês! O Gemini está ouvindo...';
-          addSystemMessage(`🎙️ Conversa iniciada no cenário <strong>${msg.scenario}</strong>.`);
+          addSystemMessage(msg.resumed
+            ? '♻️ Conexão renovada sem perder o contexto da conversa.'
+            : `🎙️ Conectado ao cenário <strong>${msg.scenario}</strong>.`);
+        } else if (msg.status === 'connecting') {
+          updateStatus('connecting', 'Conectando ao Gemini... ⏳');
+        } else if (msg.status === 'reconnecting') {
+          stopAllAudioPlayback();
+          updateStatus('connecting', `Reconectando... tentativa ${msg.attempt}`);
+          actionPrompt.innerText = 'A conexão está sendo renovada automaticamente...';
+        } else if (msg.status === 'reconnecting_soon') {
+          actionPrompt.innerText = 'O Gemini renovará a conexão em instantes; pode continuar falando.';
+        } else if (msg.status === 'listening') {
+          updateStatus('connected', '🟢 Microfone ativo - Ouvindo...');
+          actionPrompt.innerText = 'Pode falar em inglês! O áudio está chegando ao Gemini.';
+        } else if (msg.status === 'closed') {
+          addSystemMessage(`🔒 ${msg.message || 'A sessão com o Gemini terminou.'}`);
+          await stopLiveSession();
         }
       } else if (msg.type === 'audio') {
-        updateStatus('speaking', 'Gemini Falando...');
+        isAiSpeaking = true;
+        updateStatus('speaking', '🔊 Gemini Falando...');
         queueAudioChunk(msg.data);
       } else if (msg.type === 'transcript_user') {
-        appendChatMessage('user', msg.text);
+        appendStreamText('user', msg.text);
       } else if (msg.type === 'transcript_ai') {
-        appendChatMessage('ai', msg.text);
+        appendStreamText('ai', msg.text);
       } else if (msg.type === 'interrupted') {
-        console.log('⚡ Interrompendo áudio imediatamente!');
+        console.log('⚡ Interrupção de fala');
         stopAllAudioPlayback();
-        updateStatus('connected', 'Ouvindo você...');
+        resetStreamBubbles();
+        isAiSpeaking = false;
+        updateStatus('connected', '🟢 Ouvindo você...');
       } else if (msg.type === 'turn_complete') {
-        updateStatus('connected', 'Ouvindo você...');
+        resetStreamBubbles();
+        isAiSpeaking = false;
+        updateStatus('connected', '🟢 Ouvindo você...');
       } else if (msg.type === 'error') {
         alert(`Atenção: ${msg.message}`);
-        stopLiveSession();
+        await stopLiveSession();
       }
     };
 
-    socket.onerror = (err) => {
+    sessionSocket.onerror = (err) => {
+      if (socket !== sessionSocket) return;
       console.error('Erro no WebSocket:', err);
-      updateStatus('disconnected', 'Erro na conexão');
+      updateStatus('connecting', 'Instabilidade na conexão...');
     };
 
-    socket.onclose = () => {
-      stopLiveSession();
-    };
+    sessionSocket.onclose = async () => {
+      if (socket !== sessionSocket) return;
 
-    drawVisualizer();
+      socket = null;
+      if (isSessionActive) {
+        console.log('Conexão encerrada');
+        addSystemMessage('⚠️ A conexão com o servidor local foi encerrada. Clique no microfone para reconectar.');
+        await stopLiveSession();
+      }
+    };
 
   } catch (error) {
     console.error('Erro ao iniciar sessão ao vivo:', error);
     alert(`Erro ao acessar microfone ou iniciar conexão: ${error.message}`);
-    stopLiveSession();
+    await stopLiveSession();
+  } finally {
+    isSessionStarting = false;
   }
-}
-
-/**
- * Fallback usando ScriptProcessorNode para garantir compatibilidade 100%
- */
-function setupScriptProcessor(sourceNode) {
-  const bufferSize = 4096;
-  scriptProcessorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
-
-  scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
-    if (!isSessionActive || !socket || socket.readyState !== WebSocket.OPEN) return;
-
-    const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-    const sampleRateRatio = audioContext.sampleRate / 16000;
-    const outputLength = Math.floor(inputData.length / sampleRateRatio);
-    const result = new Int16Array(outputLength);
-
-    let offsetResult = 0;
-    let offsetInput = 0;
-
-    while (offsetResult < outputLength) {
-      const nextOffsetInput = Math.round((offsetResult + 1) * sampleRateRatio);
-      let accum = 0;
-      let count = 0;
-      for (let i = offsetInput; i < nextOffsetInput && i < inputData.length; i++) {
-        accum += inputData[i];
-        count++;
-      }
-      const sample = count > 0 ? accum / count : 0;
-      const clamped = Math.max(-1, Math.min(1, sample));
-      result[offsetResult] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
-
-      offsetResult++;
-      offsetInput = nextOffsetInput;
-    }
-
-    if (result.length > 0) {
-      socket.send(result.buffer);
-    }
-  };
-
-  sourceNode.connect(scriptProcessorNode);
-
-  // Conecta em um ganho zero para manter o processador ativo sem gerar eco
-  dummyGainNode = audioContext.createGain();
-  dummyGainNode.gain.value = 0;
-  scriptProcessorNode.connect(dummyGainNode);
-  dummyGainNode.connect(audioContext.destination);
 }
 
 // ==========================================
 // 7. FINALIZAR SESSÃO AO VIVO
 // ==========================================
-function stopLiveSession() {
+async function stopLiveSession() {
+  if (!isSessionActive && !isSessionStarting && !socket && !audioContext) return;
+
   isSessionActive = false;
+  isSessionStarting = false;
+  isAiSpeaking = false;
   micBtn.classList.remove('active');
   updateStatus('disconnected', 'Desconectado');
   actionPrompt.innerText = 'Clique no microfone para iniciar a conversação em inglês!';
+  resetStreamBubbles();
 
   if (socket) {
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'stop' }));
-    }
-    socket.close();
+    const s = socket;
     socket = null;
+    if (s.readyState === WebSocket.OPEN) {
+      s.send(JSON.stringify({ type: 'stop' }));
+    }
+    if (s.readyState === WebSocket.OPEN || s.readyState === WebSocket.CONNECTING) {
+      s.close();
+    }
   }
 
   if (mediaStream) {
@@ -321,7 +339,14 @@ function stopLiveSession() {
 
   stopAllAudioPlayback();
 
+  if (audioWorkletNode) {
+    try { audioWorkletNode.disconnect(); } catch (e) {}
+    audioWorkletNode.port.onmessage = null;
+    audioWorkletNode = null;
+  }
+
   if (scriptProcessorNode) {
+    scriptProcessorNode.onaudioprocess = null;
     try { scriptProcessorNode.disconnect(); } catch (e) {}
     scriptProcessorNode = null;
   }
@@ -331,9 +356,17 @@ function stopLiveSession() {
     dummyGainNode = null;
   }
 
-  if (audioContext && audioContext.state !== 'closed') {
-    audioContext.close();
-    audioContext = null;
+  analyserNode = null;
+
+  const contextToClose = audioContext;
+  audioContext = null;
+  if (contextToClose && contextToClose.state !== 'closed') {
+    try { await contextToClose.close(); } catch (e) {}
+  }
+
+  if (visualizerFrameId !== null) {
+    cancelAnimationFrame(visualizerFrameId);
+    visualizerFrameId = null;
   }
 
   canvasCtx.clearRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
@@ -383,6 +416,10 @@ function queueAudioChunk(base64Data) {
     if (index > -1) {
       activeAudioSourceNodes.splice(index, 1);
     }
+    if (activeAudioSourceNodes.length === 0) {
+      isAiSpeaking = false;
+      updateStatus('connected', '🟢 Ouvindo você...');
+    }
   };
 }
 
@@ -395,6 +432,7 @@ function stopAllAudioPlayback() {
   });
   activeAudioSourceNodes = [];
   nextStartTime = 0;
+  isAiSpeaking = false;
 }
 
 // ==========================================
@@ -403,7 +441,7 @@ function stopAllAudioPlayback() {
 function drawVisualizer() {
   if (!isSessionActive || !analyserNode) return;
 
-  requestAnimationFrame(drawVisualizer);
+  visualizerFrameId = requestAnimationFrame(drawVisualizer);
 
   const bufferLength = analyserNode.frequencyBinCount;
   const dataArray = new Uint8Array(bufferLength);
@@ -413,7 +451,7 @@ function drawVisualizer() {
   canvasCtx.fillRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
 
   canvasCtx.lineWidth = 2.5;
-  canvasCtx.strokeStyle = '#06b6d4';
+  canvasCtx.strokeStyle = isAiSpeaking ? '#a855f7' : '#06b6d4';
   canvasCtx.beginPath();
 
   const sliceWidth = visualizerCanvas.width * 1.0 / bufferLength;
@@ -437,7 +475,7 @@ function drawVisualizer() {
 }
 
 // ==========================================
-// 10. ATUALIZAÇÃO DE INTERFACE E CHAT (DOM)
+// 10. ATUALIZAÇÃO DE INTERFACE E CHAT (STREAMING)
 // ==========================================
 function updateStatus(state, text) {
   statusBadge.className = 'badge';
@@ -445,15 +483,37 @@ function updateStatus(state, text) {
     statusBadge.classList.add('badge-connected');
   } else if (state === 'speaking') {
     statusBadge.classList.add('badge-speaking');
+  } else if (state === 'connecting') {
+    statusBadge.classList.add('badge-connecting');
   } else {
     statusBadge.classList.add('badge-disconnected');
   }
   statusText.innerText = text;
 }
 
-function appendChatMessage(sender, text) {
-  if (!text || !text.trim()) return;
+function appendStreamText(sender, text) {
+  if (!text) return;
 
+  if (sender === 'user') {
+    currentAiBubble = null;
+    if (!currentUserBubble) {
+      currentUserBubble = createMessageBubble('user');
+    }
+    const contentSpan = currentUserBubble.querySelector('.message-content');
+    contentSpan.innerText += text;
+  } else if (sender === 'ai') {
+    currentUserBubble = null;
+    if (!currentAiBubble) {
+      currentAiBubble = createMessageBubble('ai');
+    }
+    const contentSpan = currentAiBubble.querySelector('.message-content');
+    contentSpan.innerText += text;
+  }
+
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function createMessageBubble(sender) {
   const bubble = document.createElement('div');
   bubble.className = `message-bubble ${sender}`;
 
@@ -462,16 +522,22 @@ function appendChatMessage(sender, text) {
   author.innerText = sender === 'user' ? '👤 Você' : '🤖 Gemini Live';
 
   const content = document.createElement('div');
-  content.innerText = text;
+  content.className = 'message-content';
 
   bubble.appendChild(author);
   bubble.appendChild(content);
 
   chatMessages.appendChild(bubble);
-  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return bubble;
+}
+
+function resetStreamBubbles() {
+  currentAiBubble = null;
+  currentUserBubble = null;
 }
 
 function addSystemMessage(htmlText) {
+  resetStreamBubbles();
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble system-message';
   bubble.innerHTML = htmlText;
